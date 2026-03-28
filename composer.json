@@ -1,0 +1,14 @@
+{
+    "name": "zhang-et-al/lgbot",
+    "description": "LiveGore API",
+    "type": "library",
+    "require": {
+        "guzzlehttp/guzzle": "^7.10",
+        "guzzlehttp/psr7": "^2.9"
+    },
+    "autoload": {
+        "psr-4": {
+            "ZhangEtAl\\Lgbot\\": "src/"
+        }
+    }
+}

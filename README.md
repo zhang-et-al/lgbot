@@ -1,0 +1,2 @@
+# lgbot
+LiveGore API
