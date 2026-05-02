@@ -3,7 +3,7 @@
 namespace ZhangEtAl\Lgbot;
 
 # require_once 'vendor/autoload.php';
-require 'comments.php';
+
 
 class LGBot
 {
@@ -11,14 +11,44 @@ class LGBot
 	private $cookieJar;
 	private $domDocument;
 
-	private $username;
+	public readonly string $username;
 
-	public function request(string $method, $uri = '', array $options = []) : Psr\Http\Message\ResponseInterface // GuzzleHttp\Psr7\Response
+	private static $comments = [];
+
+	private function loadResponseHTML(\Psr\Http\Message\ResponseInterface $res)
+	{
+		if(
+			$res->getBody() != '' && 
+			(str_contains($res->getHeaderLine('Content-Type'), 'xml') || str_contains($res->getHeaderLine('Content-Type'), 'html'))
+		)
+		{
+			$this->domDocument->loadhtml($res->getBody());
+		}
+	}
+
+	public function request(string $method, $uri = '', array $options = []) : \Psr\Http\Message\ResponseInterface // GuzzleHttp\Psr7\Response
 	{
 		$res = $this->client->request($method, $uri, $options);
 
-		if(in_array($res->getHeaderLine('Content-Type'), ['application/xml', 'text/xml', 'text/html', 'application/xhtml+xml']))
-			$this->domDocument->loadhtml($res->getBody());
+		$this->loadResponseHTML($res);
+
+		return $res;
+	}
+
+	public function get(string $uri, array $options = []) : \Psr\Http\Message\ResponseInterface
+	{
+		$res = $this->client->get($uri, $options);
+
+		$this->loadResponseHTML($res);
+
+		return $res;
+	}
+
+	public function post(string $uri, array $options = []) : \Psr\Http\Message\ResponseInterface
+	{
+		$res = $this->client->post($uri, $options);
+
+		$this->loadResponseHTML($res);
 
 		return $res;
 	}
@@ -29,12 +59,32 @@ class LGBot
 		private bool $tor,
 		private ?string $workingDir = null
 	) {
-		if(is_null($workingDir)) $workingDir = dirname($_SERVER['PHP_SELF']);
+		$this->workingDir ??= dirname($_SERVER['PHP_SELF']);
 
 		// Sets up the cookie jar
-		if(!is_dir("$workingDir/cookies")) mkdir("$workingDir/cookies");
+		if(!is_dir($this->workingDir. "/cookies"))
+			mkdir($this->workingDir . "/cookies");
 
-		$this->cookieJar = new \GuzzleHttp\Cookie\FileCookieJar("$workingDir/cookies/$email.json", true);
+		# Loads the comments for spamming
+		if(!count(self::$comments))
+		{
+			$commentsPath = __DIR__ . "/../resources/comments.txt";
+
+			$fp = fopen($commentsPath, "r");
+
+			if($fp) {
+				while(($buffer = fgets($fp)) !== false)
+					self::$comments[] = $buffer;
+			}
+			else
+			{
+				$this->log("Error: could not load comments from $commentsPath");
+			}
+
+			fclose($fp);
+		}
+
+		$this->cookieJar = new \GuzzleHttp\Cookie\FileCookieJar($this->workingDir. "/cookies/$email.json", true);
 
 		// Initialises the xPath engine
 		libxml_use_internal_errors(true);
@@ -53,57 +103,61 @@ class LGBot
 		]);
 
 		// If the session cookies are valid, skip login
-		if($this->getUsername())
+		$this->get('/');
+		$username = $this->xPath('//*[@class="rb-havatar"]/*[@class="rb-avatar-link"]/@href')[0]?->nodeValue;
+
+		if($username)
 		{
+			$this->username = substr($username, 7);
 			$this->log("Already logged in");
 			return;
 		}
-
-		$this->log("Logging in...");
-
-		$res = $this->client->get('/login');
-		$code = $this->runXPath($res, '//input[@name="code"]/@value')[0]->nodeValue;
-		
-		$res = $this->client->post('/login', [
-			'form_params' => [
-				'emailhandle' => $this->email,
-				'password' => $this->password,
-				'dologin' => 1,
-				'code' => $code
-			],
-			'allow_redirects' => false
-		]);
-
-		$status = $res->getStatusCode();
-		if($status != 302)
+		else
 		{
-			$this->log("Got code $status. Could not log in!");
-			return;
-		}
+			$this->log("Logging in...");
 
-		$this->getUsername();
+			$this->get('/login');
+			$code = $this->xPath('//input[@name="code"]/@value')[0]->nodeValue;
+			
+			$res = $this->post('/login', [
+				'form_params' => [
+					'emailhandle' => $this->email,
+					'password' => $this->password,
+					'dologin' => 1,
+					'code' => $code
+				],
+				'allow_redirects' => false
+			]);
+
+			$status = $res->getStatusCode();
+			if($status != 302)
+			{
+				$this->log("Got code $status. Could not log in!");
+				return;
+			}
+
+			# Checks the login was successful
+			$this->get('/');
+			$username = $this->xPath('//*[@class="rb-havatar"]/*[@class="rb-avatar-link"]/@href')[0]?->nodeValue;
+
+			if($username)
+			{
+				$this->username = substr($username, 7);
+				$this->log("Login successful!");
+			}
+			else
+			{
+				$this->log("Login failed: could not find username!");
+			}
+		}
 	}
 
-	private function runXPath(string|\GuzzleHttp\Psr7\Response $xml, string $query)
+	public function xPath(string $query, ?\DOMNode $contextNode = null)
 	{
-		if($xml) $this->domDocument->loadhtml(is_string($xml) ? $xml : $xml->getBody());
 		$this->xpath = new \DOMXPath($this->domDocument);
-		return $this->xpath->query($query);
+		return $this->xpath->query($query, $contextNode);
 	}
 
-	// Returns the account's username or null if not logged it
-	public function getUsername(bool $forceCheck = false) : string|null
-	{
-		if($this->username == null || $forceCheck)
-		{
-			$res = $this->client->get('/');
-			$this->username = $this->runXPath($res, '//*[@class="rb-havatar"]/*[@class="rb-avatar-link"]/@href')[0]?->nodeValue;
-
-			if($this->username) $this->username = substr($this->username, 7);
-		}
-		return $this->username;
-	}
-	//public function login(string $email, string $password)
 
 	private $sitemap = null;
 
@@ -112,40 +166,49 @@ class LGBot
 		if(!$this->sitemap || $forceReload)
 		{
 			#$this->sitemap = $this->client->get('/sitemap.xml')->getBody();
-			$this->sitemap = file_get_contents("$workingDir/sitemap.xml");
+			$this->sitemap = file_get_contents($this->workingDir . "/sitemap.xml");
 		}
 		return $this->sitemap;
 	}
 
 	public function getAllVideos(bool $forceReload = false) : array
 	{
+		$this->domDocument->loadhtml($this->getSitemap());
 
 		return array_map(fn($entry) => intval(substr($entry->nodeValue, 25, strpos($entry->nodeValue, '/', 25)-25)),
-			iterator_to_array($this->runXPath($this->getSitemap(), '//loc[not(contains(text(), "/user/") or contains(text(), "/tag/") or contains(text(), "/questions/") or contains(text(), "/categories"))]/text()')));
+			iterator_to_array($this->xPath('//loc[not(contains(text(), "/user/") or contains(text(), "/tag/") or contains(text(), "/questions/") or contains(text(), "/categories"))]/text()')));
 	}
 
 	public function getAllUsers(bool $forceReload = false) : array
 	{
-		return array_map(fn($entry) => $entry->nodeValue, iterator_to_array($this->runXPath($this->getSitemap(), '//loc[contains(text(), "/user/")]/text()')));
+		$this->domDocument->loadhtml($this->getSitemap());
+
+		return array_map(fn($entry) => $entry->nodeValue, iterator_to_array($this->xPath('//loc[contains(text(), "/user/")]/text()')));
 	}
 
 	public function loadVideo(int $id) : void
 	{
-		$res = $this->client->get("/$videoId");
+		$res = $this->get("/$videoId");
 	}
 
 	public function getVideoStreamURL(int $videoId) : string
 	{
-		$res = $this->client->get("/$videoId");
-		return $this->runXPath($res, '//video/source/@src')[0]->nodeValue;
+		$this->get("/$videoId");
+		return $this->xPath('//video/source/@src')[0]->nodeValue;
 	}
 
 	public function comment(string $text, int $id) : ?int
 	{
-		$res = $this->client->get("/$id");
-		$code = $this->runXPath($res, '//form[@name="a_form"]//input[@name="code"]/@value')[0]->nodeValue;
+		$this->get("/$id");
+		$code = $this->xPath('//form[@name="a_form"]//input[@name="code"]/@value')[0]?->nodeValue;
 
-		$res = $this->client->post("/", [
+		if(is_null($code))
+		{
+			$this->log("Could not comment. Failed to find form code (likely causes: rate limit or banned account)");
+			return null;
+		}
+
+		$res = $this->post("/", [
 			'form_params' => [
 				'a_content' => $text,
 				'' => 'Add Comment',
@@ -178,28 +241,170 @@ class LGBot
 		$this->log("Commented on $id");
 
 		$res = $res->getBody();
-		$res = substr($res, strpos($res, '<'));
+		
+		$this->domDocument->loadhtml(substr($res, strpos($res, '<')));
 
-		return intval($this->runXPath($res, '//div[@class="rb-a-item-content"]/a/@name')[0]->nodeValue);
+		return intval($this->xPath('//div[@class="rb-a-item-content"]/a/@name')[0]->nodeValue);
 	}
 
+	public function reply(string $text, int $videoId, int $commentId) : ?int
+	{
+		$this->get("/$videoId");
+		$code = $this->xPath("//input[@name='c{$commentId}_code']/@value")[0]?->nodeValue;
+
+		if(is_null($code))
+		{
+			$this->log("Could not reply. Failed to find form code (likely causes: rate limit or banned account)");
+			return null;
+		}
+
+		$res = $this->post("/", [
+			'form_params' => [
+				"c{$commentId}_content" => $text,
+				'' => 'Add Comment',
+				'docancel' => 'Cancel',
+				"c{$commentId}_editor" => '',
+				"c{$commentId}_doadd" => 1,
+				"c{$commentId}_code" => $code,
+				'c_questionid' => $videoId,
+				'c_parentid' => $commentId,
+				'qa' => 'ajax',
+				'qa_operation' => 'comment',
+				'qa_root' => '../',
+				'qa_request' => $videoId
+			],
+			'allow_redirects' => false,
+		]);
+
+		$c = $res->getStatusCode();
+		if($c != 200)
+		{
+			$this->log("Could not reply. Server responded with code $c");
+			return null;
+		}
+
+		$body = $res->getBody();
+		$lines = explode("\n", $body);
+
+		if($lines[1] != '1')
+		{
+			$this->log("Could not reply. Server responded with (truncated):\n". substr($body, 0, 50));
+			return null;
+		}
+
+		$this->log("Replied to $commentId on $videoId");
+
+		return intval(str_replace('c', '', $lines[2]));
+	}
+
+	public function hideComment(int $videoId, int $commentId)
+	{
+		$code = $this->xPath("//div[@id='a$commentId']//form[2]//input[@name='code']/@value")[0]?->nodeValue;
+
+		if(is_null($code))
+		{
+			$this->log("Could not hide. Failed to find form code (likely causes: rate limit or banned account)");
+			return null;
+		}
+
+		$res = $this->post("/", [
+			'form_params' => [
+				'questionid' => $videoId,
+				'answerid' => $commentId,
+				'code' => $code,
+				"a{$commentId}_dohide" => 'hide',
+				'qa' => 'ajax',
+				'qa_operation' => 'click_a',
+				'qa_root' => '../',
+				'qa_request' => $videoId
+			],
+			'allow_redirects' => false,
+		]);
+
+		$c = $res->getStatusCode();
+		if($c != 200)
+		{
+			$this->log("Could not hide. Server responded with code $c");
+			return null;
+		}
+
+		$body = $res->getBody();
+		$lines = explode("\n", $body);
+
+		if($lines[1] != '1')
+		{
+			$this->log("Could not hide. Server responded with (truncated):\n". substr($body, 0, 50));
+			return null;
+		}
+
+		$this->log("Hid $commentId on $videoId");
+
+		return intval(str_replace('c', '', $lines[2]));
+	}
+
+	public function hideReply(int $videoId, int $commentId, int $replyId)
+	{
+		$this->get("/$videoId");
+		$code = $this->xPath("//div[@id='a$commentId']/div[@class='rb-a-item-main']/form/input[@name='code']/@value")[0]?->nodeValue;
+
+		if(is_null($code))
+		{
+			$this->log("Could not hide. Failed to find form code (likely causes: rate limit or banned account)");
+			return null;
+		}
+
+		$res = $this->post("/", [
+			'form_params' => [
+				'commentid' => $replyId,
+				'questionid' => $videoId,
+				'parentid' => $commentId,
+				'code' => $code,
+				"c{$replyId}_dohide" => 'hide',
+				'qa' => 'ajax',
+				'qa_operation' => 'click_c',
+				'qa_root' => '../',
+				'qa_request' => $videoId
+			],
+			'allow_redirects' => false,
+		]);
+
+		
+		$c = $res->getStatusCode();
+		if($c != 200)
+		{
+			$this->log("Could not hide. Server responded with code $c");
+			return null;
+		}
+
+		$body = $res->getBody();
+		$lines = explode("\n", $body);
+
+		if($lines[1] != '1')
+		{
+			$this->log("Could not hide. Server responded with (truncated):\n". substr($body, 0, 50));
+			return null;
+		}
+
+		$this->log("Hid reply $replyId on $videoId");
+
+		return intval(str_replace('c', '', $lines[2]));
+	}
 
 	public function getVideoUploader(int $id) : string
 	{
-		$res = $this->client->get("/$id");
-		return $this->runXPath($res, '//div[@class="solyan"]//span[@class="vcard author"]/a/text()')[0]->nodeValue;
+		return $this->xPath('//div[@class="solyan"]//span[@class="vcard author"]/a/text()')[0]->nodeValue;
 	}
 
 	public function vote(int $videoId, ?int $commentId = null)
 	{
-		$res = $this->client->get("/$videoId");
+		$this->get("/$videoId");
 
 		//if(is_null($commentId))
-			$code = $this->runXPath($res, '//div[@class="sharetop"]//form//input[@name="code"]/@value')[0]->nodeValue;
+			$code = $this->xPath('//div[@class="sharetop"]//form//input[@name="code"]/@value')[0]->nodeValue;
 		//else
 
 
-		$res = $this->client->post("/", [
+		$res = $this->post("/", [
 			'form_params' => [
 				'postid' => $commentId ?? $videoId,
 				'vote' => 1,
@@ -231,9 +436,9 @@ class LGBot
 
 	public function getPoints() : int
 	{
-		$res = $this->client->get('/account');
+		$this->get('/account');
 
-		$points = $this->runXPath($res, '//span[@class="rb-profile-point"]/text()');
+		$points = $this->xPath('//span[@class="rb-profile-point"]/text()');
 
 		return intval(substr($points, 0, strpos($points, ' ')));
 	}
@@ -246,7 +451,7 @@ class LGBot
 		if(!is_file($filename))
 			throw new \Exception("Attempted to upload non-existing file $filename");
 
-		$res = $this->client->post('/rb-include/videoupload.php', [
+		$res = $this->post('/rb-include/videoupload.php', [
 			'headers' => [
 				'Referer' => 'https://www.livegore.com/video',
 				'X-Requested-With' => 'XMLHttpRequest',
@@ -282,7 +487,7 @@ class LGBot
 	// respond with a "resize error" if you post a non-image file
 	// It seems the 2mb file size limit is only checked on the frontend
 	// Use this method instead of uploadFile() to post images that you want to be displayed as such
-	public function uploadImage(string $filename) : string
+	public function uploadImage(string $filename) : ?string
 	{
 		if(!is_file($filename))
 			throw new \Exception("Attempted to upload non-existing file $filename");
@@ -296,7 +501,7 @@ class LGBot
 		if(in_array($fileExt, ['png', 'gif']))
 			$payloadExt = $fileExt;
 
-		$res = $this->client->post('/rb-include/processupload.php', [
+		$res = $this->post('/rb-include/processupload.php', [
 			'headers' => [
 				'Referer' => 'https://www.livegore.com/video',
 				'X-Requested-With' => 'XMLHttpRequest',
@@ -315,25 +520,48 @@ class LGBot
 			'allow_redirects' => false
 		]);
 
-		$imageUrl = $this->runXPath($res, '//img[1]/@src')[0]?->nodeValue;
+		$imageUrl = $this->xPath('//img[1]/@src')[0]?->nodeValue;
 
 		if(!$imageUrl)
 		{
 			$this->log("Could not upload: server responded with \n". $res->getBody());
-			return "";
+			return null;
 		}
 
 		return $imageUrl;
 	}
 
+	public function message(string $user, string $message)
+	{
+		$this->get("https://www.livegore.com/message/$user");
+		$code = $this->xPath('//input[@name="code"]/@value')[0]->nodeValue;
+		
+		$res = $this->post("https://www.livegore.com/message/$user", [
+			'form_params' => [
+				'message' => $message,
+				'domessage' => 1,
+				'code' => $code
+			],
+			'allow_redirects' => false,
+		]);
+
+		$c = $res->getStatusCode();
+		if($c != 302)
+		{
+			$this->log("Could not message. Server responded with code $c");
+			return false;
+		}
+
+		return true;
+	}
+
 	public function log(string $info, mixed... $values) : void
 	{
-		printf("[%s](%s) $info\n", $this->getUsername(), date('d/m/Y H:i:s'), $values);
+		printf("[%s](%s) $info\n", $this->username ?? $this->email, date('d/m/Y H:i:s'), $values);
 	}
 
 	public static function randomShittyComment()
 	{
-		global $comments;
-		return strtolower($comments[array_rand($comments)]);
+		return strtolower(self::$comments[array_rand(self::$comments)]);
 	}
 }
