@@ -9,7 +9,7 @@ class LGBot
 {
 	public $client;
 	private $cookieJar;
-	private $domDocument;
+	public $domDocument;
 
 	public readonly string $username;
 
@@ -57,7 +57,8 @@ class LGBot
 		private string $email,
 		private string $password,
 		private bool $tor,
-		private ?string $workingDir = null
+		private ?string $workingDir = null,
+		public bool $quiet = false,
 	) {
 		$this->workingDir ??= dirname($_SERVER['PHP_SELF']);
 
@@ -106,7 +107,7 @@ class LGBot
 		$this->get('/');
 		$username = $this->xPath('//*[@class="rb-havatar"]/*[@class="rb-avatar-link"]/@href')[0]?->nodeValue;
 
-		if($username)
+		if($username !== null)
 		{
 			$this->username = substr($username, 7);
 			$this->log("Already logged in");
@@ -140,7 +141,7 @@ class LGBot
 			$this->get('/');
 			$username = $this->xPath('//*[@class="rb-havatar"]/*[@class="rb-avatar-link"]/@href')[0]?->nodeValue;
 
-			if($username)
+			if($username !== null)
 			{
 				$this->username = substr($username, 7);
 				$this->log("Login successful!");
@@ -247,9 +248,9 @@ class LGBot
 		return intval($this->xPath('//div[@class="rb-a-item-content"]/a/@name')[0]->nodeValue);
 	}
 
-	public function reply(string $text, int $videoId, int $commentId) : ?int
+	public function reply(string $text, int $videoId, int $commentId, int $page = 0) : ?int
 	{
-		$this->get("/$videoId");
+		$this->get("/$videoId?start=" . ($page-1)*20);
 		$code = $this->xPath("//input[@name='c{$commentId}_code']/@value")[0]?->nodeValue;
 
 		if(is_null($code))
@@ -555,9 +556,50 @@ class LGBot
 		return true;
 	}
 
+	public function getMessages(string $user)
+	{
+		$this->get("https://www.livegore.com/message/$user");
+		$messageNodes = $this->xPath('//div[@class="rb-message-item"]');
+
+		$messages = [];
+
+		foreach($messageNodes as $messageNode)
+		{
+			# The message id
+			$id = intval(substr($messageNode->getAttribute('id'), 1));
+			# The message sender
+			$user = substr($this->xPath('.//a[@class="rb-avatar-link"]/@href', $messageNode)[0]->nodeValue, 8);
+
+			# Replace image tags by image links
+			$textNode = $this->xPath('.//div[@class="rb-message-content"]', $messageNode)[0];
+			$images = $this->xPath(".//img[@src]", $textNode);
+
+			foreach ($images as $image)
+			{
+				$src = $image->getAttribute('src');
+
+				if(!empty($src))
+				{
+					$urlNode = $this->domDocument->createTextNode($src);
+					$textNode->replaceChild($urlNode, $image);
+				}
+			}
+
+			$text = trim($textNode->nodeValue);
+
+			$messages[] = [
+				'id' => $id,
+				'text' => $text,
+				'to' => $user == $this->username ? 'out' : 'in'
+			];
+		}
+
+		return array_reverse($messages);
+	}
+
 	public function log(string $info, mixed... $values) : void
 	{
-		printf("[%s](%s) $info\n", $this->username ?? $this->email, date('d/m/Y H:i:s'), $values);
+		 if(!$this->quiet) printf("[%s](%s) %s\n", $this->username ?? $this->email, date('d/m/Y H:i:s'), $info, $values);
 	}
 
 	public static function randomShittyComment()

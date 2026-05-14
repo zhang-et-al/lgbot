@@ -6,16 +6,9 @@ class LGCommentIterator implements \Iterator
 {
 	private $position = 0;
 
-	private $buffer = [];
-
-	const bufferSize = 20;
+	private $comments = [];
 
 	private $doneFetching = false;
-
-	private function bufferIndex() : int
-	{
-		return ($this->position-$this->offset) % self::bufferSize;
-	}
 
 	private function getCommentData(\DOMNode $node, bool $reply = false) : array
 	{
@@ -72,31 +65,29 @@ class LGCommentIterator implements \Iterator
 
 	private function fetchNext()
 	{
-		if($this->doneFetching || $this->bufferIndex() != 0) return;
+		if($this->doneFetching || $this->position < count($this->comments)) return;
 
-		$this->bot->get("$this->video/?start=$this->position")->getBody();
+		$this->bot->get("$this->video/?start=".($this->position+$this->offset))->getBody();
 
 		$nodes = iterator_to_array($this->bot->xPath('//div[@id="comments"]//div[@class="rb-a-list-item  hentry answer"]'));
 	
 		if(count($nodes) < 20) 
 		{
-			$this->bot->log("Reached end");
+			#$this->bot->log("Reached end");
 			$this->doneFetching = true;
 		}
 
-		$this->buffer = array_map(
-			$this->getCommentData(...),
+		$this->comments = array_merge($this->comments, array_map(
+			fn($node) => $this->getCommentData($node),
 			$nodes
-		);
+		));
 	}
 
 	public function __construct(
 		public LGBot $bot,
 		public int $video,
 		public $offset = 0
-	) {
-		$this->position = $offset;
-	}
+	) {	}
 
 	public function key()
 	{
@@ -105,7 +96,7 @@ class LGCommentIterator implements \Iterator
 
 	public function current()
 	{
-		return $this->buffer[$this->bufferIndex()];
+		return $this->comments[$this->position];
 	}
 
 	public function next()
@@ -116,8 +107,8 @@ class LGCommentIterator implements \Iterator
 
 	public function rewind()
 	{
-		$this->position = $this->offset;
-		$this->buffer = [];
+		$this->position = 0;
+		$this->comments = [];
 		$this->doneFetching = false;
 		$this->fetchNext();
 	}
@@ -126,6 +117,6 @@ class LGCommentIterator implements \Iterator
 	{
 		# When there is no more to fetch, if the position has reached the end of 
 		# the comments array, then we're done iterating!
-		return !$this->doneFetching || $this->bufferIndex() < count($this->buffer);
+		return !$this->doneFetching || $this->position < count($this->comments);
 	}
 }
