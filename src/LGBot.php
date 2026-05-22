@@ -54,9 +54,9 @@ class LGBot
 	}
 
 	public function __construct(
-		private string $email,
-		private string $password,
-		private bool $tor,
+		public readonly string $email,
+		public readonly string $password,
+		public readonly bool $tor,
 		private ?string $workingDir = null,
 		public bool $quiet = false,
 	) {
@@ -248,9 +248,9 @@ class LGBot
 		return intval($this->xPath('//div[@class="rb-a-item-content"]/a/@name')[0]->nodeValue);
 	}
 
-	public function reply(string $text, int $videoId, int $commentId, int $page = 0) : ?int
+	public function reply(string $text, int $videoId, int $commentId, int $start = 0) : ?int
 	{
-		$this->get("/$videoId?start=" . ($page-1)*20);
+		$this->get("/$videoId?start=$start");
 		$code = $this->xPath("//input[@name='c{$commentId}_code']/@value")[0]?->nodeValue;
 
 		if(is_null($code))
@@ -298,8 +298,9 @@ class LGBot
 		return intval(str_replace('c', '', $lines[2]));
 	}
 
-	public function hideComment(int $videoId, int $commentId)
+	public function hideComment(int $videoId, int $commentId, int $start = 0)
 	{
+		$this->get("/$videoId?start=$start");
 		$code = $this->xPath("//div[@id='a$commentId']//form[2]//input[@name='code']/@value")[0]?->nodeValue;
 
 		if(is_null($code))
@@ -396,7 +397,7 @@ class LGBot
 		return $this->xPath('//div[@class="solyan"]//span[@class="vcard author"]/a/text()')[0]->nodeValue;
 	}
 
-	public function vote(int $videoId, ?int $commentId = null)
+	public function vote(int $videoId, ?int $commentId = null): bool
 	{
 		$this->get("/$videoId");
 
@@ -422,17 +423,19 @@ class LGBot
 		if($c != 200)
 		{
 			$this->log("Could not vote. Server responded with code $c");
-			return;
+			return false;
 		}
 
 		$body = $res->getBody();
 		if(explode("\n", $body)[1] != '1')
 		{
 			$this->log("Could not vote. Server responded with (truncated):\n". substr($body, 0, 50));
-			return;
+			return false;
 		}
 
 		$this->log("Voted " . (is_null($commentId) ? '' : "comment $commentId ") . "on $videoId");
+
+		return true;
 	}
 
 	public function getPoints() : int
